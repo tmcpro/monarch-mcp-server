@@ -8,6 +8,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { MonarchMoney } from './monarch-client.js';
 import type { Env } from './auth.js';
+import {
+  AuthHealthManager,
+  MagicLinkManager,
+  generateAuthErrorMessage,
+  generateSetupWizardMessage,
+  generateStatusReport,
+} from './auth-flow.js';
 
 export class MonarchMCP extends McpAgent {
   server = new McpServer({
@@ -21,13 +28,24 @@ export class MonarchMCP extends McpAgent {
 
   /**
    * Get authenticated Monarch Money client
+   * Throws user-friendly error with setup instructions if not authenticated
    */
   private async getMonarchClient(): Promise<MonarchMoney> {
+    // Check auth health first
+    const healthManager = new AuthHealthManager(this.env);
+    const status = await healthManager.checkAuthHealth(this.userId);
+
+    if (!status.hasMonarchToken) {
+      // Generate user-friendly error message
+      const errorMessage = generateAuthErrorMessage(status);
+      throw new Error(errorMessage);
+    }
+
     // Get token from KV storage
     const token = await this.env.MONARCH_KV.get(`monarch:token:${this.userId}`);
 
     if (!token) {
-      throw new Error('No Monarch Money token found. Please refresh your session at /auth/refresh');
+      throw new Error('Token validation failed. Please try the setup_wizard tool.');
     }
 
     return new MonarchMoney(token);
@@ -37,7 +55,61 @@ export class MonarchMCP extends McpAgent {
    * Initialize MCP server with all tools
    */
   async init() {
-    // Tool 1: Setup Authentication
+    // Tool 1: Setup Wizard (Enhanced - with magic link)
+    this.server.tool(
+      'setup_wizard',
+      {},
+      async () => {
+        const healthManager = new AuthHealthManager(this.env);
+        const magicLinkManager = new MagicLinkManager(this.env);
+
+        // Check current status
+        const status = await healthManager.checkAuthHealth(this.userId);
+
+        // Generate magic link for easy access
+        const magicLink = await magicLinkManager.generateMagicLink(this.userId);
+
+        // Get days until expiry if token exists
+        const daysUntilExpiry = await healthManager.getDaysUntilExpiry(this.userId);
+
+        // Generate wizard message
+        const message = generateSetupWizardMessage(magicLink, daysUntilExpiry);
+
+        return {
+          content: [{
+            type: 'text',
+            text: message
+          }]
+        };
+      }
+    );
+
+    // Tool 2: Check Status (Enhanced - comprehensive health check)
+    this.server.tool(
+      'check_status',
+      {},
+      async () => {
+        const healthManager = new AuthHealthManager(this.env);
+
+        // Check comprehensive auth health
+        const status = await healthManager.checkAuthHealth(this.userId);
+
+        // Get days until expiry
+        const daysUntilExpiry = await healthManager.getDaysUntilExpiry(this.userId);
+
+        // Generate status report
+        const message = generateStatusReport(status, daysUntilExpiry);
+
+        return {
+          content: [{
+            type: 'text',
+            text: message
+          }]
+        };
+      }
+    );
+
+    // Tool 3: Legacy Setup Authentication (kept for backward compatibility)
     this.server.tool(
       'setup_authentication',
       {},
@@ -45,6 +117,12 @@ export class MonarchMCP extends McpAgent {
         content: [{
           type: 'text',
           text: `🔐 Monarch Money - Setup Instructions
+
+💡 **Tip:** Use the \`setup_wizard\` tool for an easier guided setup experience!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**Manual Setup:**
 
 1️⃣ Visit the token refresh page:
    https://monarch-mcp.tm3.workers.dev/auth/refresh
@@ -60,28 +138,39 @@ export class MonarchMCP extends McpAgent {
    • get_transactions - Recent transactions
    • get_budgets - Budget information
 
-✅ Token persists for weeks/months
+✅ Token persists for 90 days
 ✅ No frequent re-authentication needed
 ✅ Secure encrypted storage`
         }]
       })
     );
 
-    // Tool 2: Check Auth Status
+    // Tool 4: Legacy Check Auth Status (kept for backward compatibility)
     this.server.tool(
       'check_auth_status',
       {},
       async () => {
-        const token = await this.env.MONARCH_KV.get(`monarch:token:${this.userId}`);
+        const healthManager = new AuthHealthManager(this.env);
+        const status = await healthManager.checkAuthHealth(this.userId);
+        const daysUntilExpiry = await healthManager.getDaysUntilExpiry(this.userId);
 
-        const status = token
-          ? '✅ Monarch Money token found in secure storage'
-          : '❌ No Monarch Money token found. Visit /auth/refresh to authenticate';
+        let message = '📊 **Authentication Status**\n\n';
+        message += `User ID: ${this.userId}\n\n`;
+
+        if (status.hasMonarchToken) {
+          message += '✅ Monarch Money token: ACTIVE\n';
+          if (daysUntilExpiry !== null) {
+            message += `⏱️  Expires in: ${daysUntilExpiry} days\n`;
+          }
+        } else {
+          message += '❌ Monarch Money token: NOT CONFIGURED\n';
+          message += '\n💡 Use `setup_wizard` tool to get started!';
+        }
 
         return {
           content: [{
             type: 'text',
-            text: `${status}\n\n💡 User ID: ${this.userId}\n💡 Try get_accounts to test connection`
+            text: message
           }]
         };
       }
@@ -376,6 +465,6 @@ export class MonarchMCP extends McpAgent {
       }
     );
 
-    console.log('✅ Monarch MCP Server initialized with 10 tools');
+    console.log('✅ Monarch MCP Server initialized with 12 tools (including 2 enhanced auth tools)');
   }
 }

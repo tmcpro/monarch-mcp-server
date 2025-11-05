@@ -15,6 +15,10 @@ import {
   type SessionData,
 } from './auth.js';
 import { MonarchMoney } from './monarch-client.js';
+import {
+  AuthHealthManager,
+  MagicLinkManager,
+} from './auth-flow.js';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -311,9 +315,9 @@ app.post('/auth/refresh', async (c) => {
       return c.json({ error: 'Failed to obtain token from Monarch Money' }, 500);
     }
 
-    // Store token
-    const tokenManager = new MonarchTokenManager(c.env.MONARCH_KV);
-    await tokenManager.storeToken(session.userId, token);
+    // Store token with metadata
+    const healthManager = new AuthHealthManager(c.env);
+    await healthManager.storeTokenWithMetadata(session.userId, token, 90);
 
     return c.json({ success: true, message: 'Token refreshed successfully' });
   } catch (error) {
@@ -321,6 +325,59 @@ app.post('/auth/refresh', async (c) => {
     return c.json({
       error: error instanceof Error ? error.message : 'Authentication failed'
     }, 401);
+  }
+});
+
+// Magic Link Handler (no auth required - validates via magic code)
+app.get('/auth/magic/:code', async (c) => {
+  const code = c.req.param('code');
+
+  if (!code) {
+    return c.html('<h1>Error: Invalid magic link</h1>', 400);
+  }
+
+  try {
+    const magicLinkManager = new MagicLinkManager(c.env.OAUTH_KV);
+    const userId = await magicLinkManager.validateMagicLink(code);
+
+    if (!userId) {
+      return c.html(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Magic Link Expired</title>
+          <style>
+            body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; text-align: center; }
+            .error { color: #ef4444; font-size: 18px; margin: 20px 0; }
+          </style>
+        </head>
+        <body>
+          <h1>🔗 Magic Link Expired</h1>
+          <p class="error">This magic link has expired or has already been used.</p>
+          <p>Magic links are valid for 10 minutes and can only be used once.</p>
+          <p>Please return to your conversation and use the <code>setup_wizard</code> tool to generate a new link.</p>
+        </body>
+        </html>
+      `, 410);
+    }
+
+    // Create a session for this user
+    const sessionManager = new SessionManager(c.env.OAUTH_KV);
+    const sessionId = await sessionManager.createSession(userId, `user-${userId}`, '');
+
+    // Set session cookie
+    setCookie(c, 'session_id', sessionId, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Lax',
+      maxAge: 60 * 60, // 1 hour for magic link sessions
+    });
+
+    // Redirect to token refresh page
+    return c.redirect('/auth/refresh');
+  } catch (error) {
+    console.error('Magic link error:', error);
+    return c.html(`<h1>Error</h1><p>${error instanceof Error ? error.message : String(error)}</p>`, 500);
   }
 });
 
