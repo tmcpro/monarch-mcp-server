@@ -93,3 +93,15 @@ logs/
 tmp/
 temp/
 .tmp/
+
+# Cloudflare Workers & Wrangler
+.dev.vars*
+!.dev.vars.example
+wrangler.toml
+.wrangler/
+worker/
+.mf/
+
+# Cloudflare Secrets (if accidentally exported)
+secrets.txt
+.secrets
