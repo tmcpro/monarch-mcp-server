@@ -67,6 +67,7 @@ export class GitHubOAuth {
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
+        'User-Agent': 'Monarch-MCP-Server',
       },
       body: JSON.stringify({
         client_id: this.clientId,
@@ -102,6 +103,7 @@ export class GitHubOAuth {
         'Authorization': `Bearer ${accessToken}`,
         'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'Monarch-MCP-Server',
       },
     });
 
@@ -121,6 +123,7 @@ export class GitHubOAuth {
             'Authorization': `Bearer ${accessToken}`,
             'Accept': 'application/vnd.github+json',
             'X-GitHub-Api-Version': '2022-11-28',
+            'User-Agent': 'Monarch-MCP-Server',
           },
         });
 
