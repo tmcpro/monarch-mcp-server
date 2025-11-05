@@ -73,7 +73,6 @@ Thumbs.db
 # Credentials and Session Files
 *.pickle
 *.session
-*.json
 .env*
 !.env.example
 auth_tokens/
@@ -81,9 +80,16 @@ sessions/
 .mm/
 monarch_session*
 mm_session*
+*_session.json
 token.json
 credentials.json
 refresh_token.txt
+
+# But allow config JSON files
+!package.json
+!package-lock.json
+!tsconfig.json
+!wrangler.jsonc
 
 # Logs
 *.log
