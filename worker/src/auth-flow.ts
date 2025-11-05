@@ -3,7 +3,7 @@
  * Handles out-of-band authentication and user notifications
  */
 
-import type { Env } from './auth.js';
+import { MonarchTokenManager, type Env } from './auth.js';
 
 export interface AuthStatus {
   authenticated: boolean;
@@ -31,12 +31,18 @@ export class AuthHealthManager {
   /**
    * Check comprehensive auth status for a user
    */
-  async checkAuthHealth(userId: string): Promise<AuthStatus> {
+  async checkAuthHealth(userId: string, baseUrl?: string): Promise<AuthStatus> {
     // Check if Monarch token exists and its expiry
     const tokenKey = `monarch:token:${userId}`;
     const tokenMetaKey = `monarch:token:meta:${userId}`;
 
-    const token = await this.env.MONARCH_KV.get(tokenKey);
+    let token: string | null = null;
+    try {
+      const tokenManager = new MonarchTokenManager(this.env.MONARCH_KV, this.env.COOKIE_ENCRYPTION_KEY);
+      token = await tokenManager.getToken(userId);
+    } catch (error) {
+      console.error('Auth health token fetch failed:', error);
+    }
     const tokenMeta = await this.env.MONARCH_KV.get(tokenMetaKey);
 
     let tokenExpiry: string | undefined;
@@ -59,14 +65,19 @@ export class AuthHealthManager {
     const needsAction = !token || !hasValidToken;
     let actionRequired: string | undefined;
     let setupUrl: string | undefined;
+    const origin = baseUrl || this.env.PUBLIC_BASE_URL;
 
     if (needsAction) {
       if (!token) {
         actionRequired = 'initial_setup';
-        setupUrl = 'https://monarch-mcp.tm3.workers.dev/auth/refresh';
+        if (origin) {
+          setupUrl = new URL('/auth/refresh', origin).toString();
+        }
       } else if (!hasValidToken) {
         actionRequired = 'token_expired';
-        setupUrl = 'https://monarch-mcp.tm3.workers.dev/auth/refresh';
+        if (origin) {
+          setupUrl = new URL('/auth/refresh', origin).toString();
+        }
       }
     }
 
@@ -84,16 +95,14 @@ export class AuthHealthManager {
    * Store token with metadata
    */
   async storeTokenWithMetadata(userId: string, token: string, expiryDays: number = 90): Promise<void> {
-    const tokenKey = `monarch:token:${userId}`;
     const tokenMetaKey = `monarch:token:meta:${userId}`;
 
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + expiryDays);
 
-    // Store token
-    await this.env.MONARCH_KV.put(tokenKey, token, {
-      expirationTtl: expiryDays * 24 * 60 * 60
-    });
+    // Store token (encrypted)
+    const tokenManager = new MonarchTokenManager(this.env.MONARCH_KV, this.env.COOKIE_ENCRYPTION_KEY);
+    await tokenManager.storeToken(userId, token);
 
     // Store metadata
     await this.env.MONARCH_KV.put(tokenMetaKey, JSON.stringify({
@@ -137,7 +146,7 @@ export class MagicLinkManager {
   /**
    * Generate a magic link for authentication
    */
-  async generateMagicLink(userId: string): Promise<string> {
+  async generateMagicLink(userId: string, baseUrl?: string): Promise<string> {
     const code = this.generateRandomCode(8);
     const magicKey = `magic:${code}`;
 
@@ -149,7 +158,12 @@ export class MagicLinkManager {
       expirationTtl: 600 // 10 minutes
     });
 
-    return `https://monarch-mcp.tm3.workers.dev/auth/magic/${code}`;
+    const origin = baseUrl || this.env.PUBLIC_BASE_URL;
+    if (!origin) {
+      throw new Error('Cannot generate magic link without a base URL. Configure PUBLIC_BASE_URL.');
+    }
+
+    return new URL(`/auth/magic/${code}`, origin).toString();
   }
 
   /**

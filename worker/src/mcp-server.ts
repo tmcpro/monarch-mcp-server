@@ -6,7 +6,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { MonarchMoney } from './monarch-client.js';
-import type { Env } from './auth.js';
+import { MonarchTokenManager, type Env } from './auth.js';
 import {
   AuthHealthManager,
   MagicLinkManager,
@@ -21,7 +21,12 @@ export class MonarchMCP {
     version: '0.1.0',
   });
 
-  constructor(private env: Env, private userId: string) {}
+  constructor(private env: Env, private userId: string, private baseUrl: string) {}
+
+  updateContext(env: Env, baseUrl: string) {
+    this.env = env;
+    this.baseUrl = baseUrl;
+  }
 
   /**
    * Get authenticated Monarch Money client
@@ -30,7 +35,7 @@ export class MonarchMCP {
   private async getMonarchClient(): Promise<MonarchMoney> {
     // Check auth health first
     const healthManager = new AuthHealthManager(this.env);
-    const status = await healthManager.checkAuthHealth(this.userId);
+    const status = await healthManager.checkAuthHealth(this.userId, this.baseUrl);
 
     if (!status.hasMonarchToken) {
       // Generate user-friendly error message
@@ -38,8 +43,9 @@ export class MonarchMCP {
       throw new Error(errorMessage);
     }
 
-    // Get token from KV storage
-    const token = await this.env.MONARCH_KV.get(`monarch:token:${this.userId}`);
+    // Get token from KV storage (encrypted)
+    const tokenManager = new MonarchTokenManager(this.env.MONARCH_KV, this.env.COOKIE_ENCRYPTION_KEY);
+    const token = await tokenManager.getToken(this.userId);
 
     if (!token) {
       throw new Error('Token validation failed. Please try the setup_wizard tool.');
@@ -61,10 +67,10 @@ export class MonarchMCP {
         const magicLinkManager = new MagicLinkManager(this.env);
 
         // Check current status
-        const status = await healthManager.checkAuthHealth(this.userId);
+        const status = await healthManager.checkAuthHealth(this.userId, this.baseUrl);
 
         // Generate magic link for easy access
-        const magicLink = await magicLinkManager.generateMagicLink(this.userId);
+        const magicLink = await magicLinkManager.generateMagicLink(this.userId, this.baseUrl);
 
         // Get days until expiry if token exists
         const daysUntilExpiry = await healthManager.getDaysUntilExpiry(this.userId);
@@ -89,7 +95,7 @@ export class MonarchMCP {
         const healthManager = new AuthHealthManager(this.env);
 
         // Check comprehensive auth health
-        const status = await healthManager.checkAuthHealth(this.userId);
+        const status = await healthManager.checkAuthHealth(this.userId, this.baseUrl);
 
         // Get days until expiry
         const daysUntilExpiry = await healthManager.getDaysUntilExpiry(this.userId);
@@ -148,7 +154,7 @@ export class MonarchMCP {
       {},
       async () => {
         const healthManager = new AuthHealthManager(this.env);
-        const status = await healthManager.checkAuthHealth(this.userId);
+        const status = await healthManager.checkAuthHealth(this.userId, this.baseUrl);
         const daysUntilExpiry = await healthManager.getDaysUntilExpiry(this.userId);
 
         let message = '📊 **Authentication Status**\n\n';

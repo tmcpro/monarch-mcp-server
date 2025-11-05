@@ -6,7 +6,9 @@
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import type { StatusCode } from 'hono/utils/http-status';
+import type { ExecutionContext } from '@cloudflare/workers-types';
 import { MonarchMCP } from './mcp-server.js';
+import { createMcpHandler } from 'agents/mcp';
 import {
   GitHubOAuth,
   SessionManager,
@@ -29,6 +31,10 @@ import {
 } from './oauth-mcp.js';
 
 const app = new Hono<{ Bindings: Env }>();
+
+type McpFetchHandler = (request: Request, env: Env, ctx: ExecutionContext & { props?: Record<string, unknown> }) => Promise<Response>;
+
+const mcpServerCache = new Map<string, { handler: McpFetchHandler; server: MonarchMCP }>();
 
 // Middleware to check authentication
 async function requireAuth(c: any): Promise<SessionData | Response> {
@@ -123,6 +129,31 @@ app.get('/oauth/authorize', async (c) => {
     return c.json({ error: 'invalid_request', error_description: 'Only S256 code_challenge_method is supported' }, 400);
   }
 
+  let parsedRedirect: URL;
+  try {
+    parsedRedirect = new URL(redirectUri);
+  } catch (error) {
+    return c.json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' }, 400);
+  }
+
+  if (parsedRedirect.protocol !== 'https:' && parsedRedirect.hostname !== 'localhost') {
+    return c.json({ error: 'invalid_request', error_description: 'redirect_uri must use https scheme' }, 400);
+  }
+
+  const mcpOAuthManager = new MCPOAuthManager(c.env);
+  const clientRegistration = await mcpOAuthManager.getClient(clientId);
+
+  if (!clientRegistration) {
+    return c.json({ error: 'unauthorized_client', error_description: 'Unknown client_id' }, 400);
+  }
+
+  if (clientRegistration.redirect_uris && clientRegistration.redirect_uris.length > 0) {
+    const allowed = clientRegistration.redirect_uris.includes(redirectUri);
+    if (!allowed) {
+      return c.json({ error: 'invalid_request', error_description: 'redirect_uri not registered for this client' }, 400);
+    }
+  }
+
   // Check if user is already authenticated
   const sessionId = getCookie(c, 'session_id');
   const sessionManager = new SessionManager(c.env.OAUTH_KV);
@@ -142,10 +173,9 @@ app.get('/oauth/authorize', async (c) => {
   }
 
   // User is authenticated, generate authorization code
-  const mcpOAuth = new MCPOAuthManager(c.env);
   const code = crypto.randomUUID();
 
-  await mcpOAuth.storeAuthorizationCode(
+  await mcpOAuthManager.storeAuthorizationCode(
     code,
     session.userId,
     clientId,
@@ -165,7 +195,55 @@ app.get('/oauth/authorize', async (c) => {
 // OAuth Token Endpoint - For MCP clients
 app.post('/oauth/token', async (c) => {
   try {
-    const body = await c.req.json<OAuth2TokenRequest>();
+    const contentType = c.req.header('content-type') || '';
+    let body: OAuth2TokenRequest;
+
+    if (contentType.includes('application/json')) {
+      body = await c.req.json<OAuth2TokenRequest>();
+    } else if (contentType.includes('application/x-www-form-urlencoded')) {
+      const formData = await c.req.parseBody();
+      const getValue = (key: string): string | undefined => {
+        const value = formData[key];
+        if (typeof value === 'string') return value;
+        if (value instanceof File) return undefined;
+        if (Array.isArray(value)) {
+          const first = value[0];
+          return typeof first === 'string' ? first : undefined;
+        }
+        return undefined;
+      };
+
+      body = {
+        grant_type: getValue('grant_type') ?? '',
+        code: getValue('code'),
+        redirect_uri: getValue('redirect_uri'),
+        client_id: getValue('client_id'),
+        code_verifier: getValue('code_verifier'),
+        refresh_token: getValue('refresh_token'),
+      };
+    } else {
+      // Default to trying form parsing for unknown types (e.g., no content-type header)
+      const formData = await c.req.parseBody();
+      const getValue = (key: string): string | undefined => {
+        const value = formData[key];
+        if (typeof value === 'string') return value;
+        if (value instanceof File) return undefined;
+        if (Array.isArray(value)) {
+          const first = value[0];
+          return typeof first === 'string' ? first : undefined;
+        }
+        return undefined;
+      };
+
+      body = {
+        grant_type: getValue('grant_type') ?? '',
+        code: getValue('code'),
+        redirect_uri: getValue('redirect_uri'),
+        client_id: getValue('client_id'),
+        code_verifier: getValue('code_verifier'),
+        refresh_token: getValue('refresh_token'),
+      };
+    }
 
     const mcpOAuth = new MCPOAuthManager(c.env);
 
@@ -260,6 +338,7 @@ app.post('/oauth/register', async (c) => {
 app.get('/auth/login', async (c) => {
   const baseUrl = new URL(c.req.url).origin;
   const redirectUri = `${baseUrl}/auth/callback`;
+  const oauthStateParam = c.req.query('oauth_state') ?? undefined;
 
   const oauth = new GitHubOAuth(
     c.env.GITHUB_CLIENT_ID,
@@ -268,7 +347,9 @@ app.get('/auth/login', async (c) => {
   );
 
   const stateManager = new OAuthStateManager(c.env.OAUTH_KV);
-  const state = await stateManager.createState();
+  const state = await stateManager.createState(
+    oauthStateParam ? { oauthState: oauthStateParam } : undefined
+  );
 
   const authUrl = oauth.getAuthorizationUrl(state);
   return c.redirect(authUrl);
@@ -285,11 +366,15 @@ app.get('/auth/callback', async (c) => {
 
   // Validate state
   const stateManager = new OAuthStateManager(c.env.OAUTH_KV);
-  const validState = await stateManager.validateState(state);
+  const stateData = await stateManager.validateState(state);
 
-  if (!validState) {
+  if (!stateData) {
     return c.html('<h1>Error: Invalid OAuth state</h1>', 400);
   }
+
+  const oauthStateFromMetadata = typeof stateData.oauthState === 'string'
+    ? stateData.oauthState
+    : undefined;
 
   try {
     const baseUrl = new URL(c.req.url).origin;
@@ -324,17 +409,16 @@ app.get('/auth/callback', async (c) => {
     });
 
     // Check if this was part of an MCP OAuth flow
-    const oauthStateParam = c.req.query('oauth_state');
-    if (oauthStateParam) {
+    if (oauthStateFromMetadata) {
       // Get pending OAuth params
-      const pendingData = await c.env.OAUTH_KV.get(`oauth:pending:${oauthStateParam}`);
+      const pendingData = await c.env.OAUTH_KV.get(`oauth:pending:${oauthStateFromMetadata}`);
       if (pendingData) {
         const params = JSON.parse(pendingData);
         // Redirect back to OAuth authorize endpoint with original params
         const authorizeUrl = new URL(`${baseUrl}/oauth/authorize`);
         authorizeUrl.searchParams.set('client_id', params.clientId);
         authorizeUrl.searchParams.set('redirect_uri', params.redirectUri);
-        authorizeUrl.searchParams.set('state', oauthStateParam);
+        authorizeUrl.searchParams.set('state', oauthStateFromMetadata);
         authorizeUrl.searchParams.set('code_challenge', params.codeChallenge);
         authorizeUrl.searchParams.set('code_challenge_method', params.codeChallengeMethod);
         authorizeUrl.searchParams.set('response_type', 'code');
@@ -357,7 +441,7 @@ app.get('/dashboard', async (c) => {
   const session = sessionResult as SessionData;
 
   // Check if Monarch token exists
-  const tokenManager = new MonarchTokenManager(c.env.MONARCH_KV);
+  const tokenManager = new MonarchTokenManager(c.env.MONARCH_KV, c.env.COOKIE_ENCRYPTION_KEY);
   const monarchToken = await tokenManager.getToken(session.userId);
 
   return c.html(`
@@ -606,6 +690,10 @@ app.get('/auth/logout', async (c) => {
 
   if (sessionId) {
     const sessionManager = new SessionManager(c.env.OAUTH_KV);
+    const session = await sessionManager.getSession(sessionId);
+    if (session) {
+      mcpServerCache.delete(session.userId);
+    }
     await sessionManager.deleteSession(sessionId);
     deleteCookie(c, 'session_id');
   }
@@ -617,7 +705,6 @@ app.get('/auth/logout', async (c) => {
 app.all('/mcp', async (c) => {
   let userId: string;
 
-  // Check for Bearer token (OAuth 2.1 - for MCP clients like ChatGPT)
   const authHeader = c.req.header('Authorization');
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -635,20 +722,38 @@ app.all('/mcp', async (c) => {
 
     userId = tokenData.userId;
   } else {
-    // Fall back to session cookie (for web UI)
     const sessionResult = await requireAuth(c);
     if (sessionResult instanceof Response) return sessionResult;
     const session = sessionResult as SessionData;
     userId = session.userId;
   }
 
-  // Create MCP server instance
-  const mcpServer = new MonarchMCP(c.env, userId);
-  await mcpServer.init();
+  const baseUrl = new URL(c.req.url).origin;
+  const cacheKey = userId;
+  let cached = mcpServerCache.get(cacheKey);
 
-  // Handle MCP request
-  // Note: This is a simplified version. In production, you'd use the full MCP transport layer
-  return c.json({ message: 'MCP endpoint - use with MCP transport library' });
+  if (!cached) {
+    const serverInstance = new MonarchMCP(c.env, userId, baseUrl);
+    await serverInstance.init();
+    const handler = createMcpHandler(serverInstance.server, {
+      route: '/mcp',
+      corsOptions: {
+        origin: '*',
+        headers: 'Content-Type, Accept, Authorization, mcp-session-id, MCP-Protocol-Version',
+        methods: 'GET, POST, DELETE, OPTIONS',
+        exposeHeaders: 'mcp-session-id'
+      }
+    });
+    cached = { handler, server: serverInstance };
+    mcpServerCache.set(cacheKey, cached);
+  } else {
+    cached.server.updateContext(c.env, baseUrl);
+  }
+
+  const executionCtx = c.executionCtx as ExecutionContext & { props?: Record<string, unknown> };
+  executionCtx.props = { userId };
+
+  return cached.handler(c.req.raw, c.env, executionCtx);
 });
 
 // Health check

@@ -4,6 +4,7 @@
 
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
+import { decryptString, encryptString } from './crypto.js';
 
 export interface Env {
   OAUTH_KV: KVNamespace;
@@ -11,6 +12,7 @@ export interface Env {
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
   COOKIE_ENCRYPTION_KEY: string;
+  PUBLIC_BASE_URL?: string;
 }
 
 export interface GitHubUser {
@@ -213,15 +215,24 @@ export class SessionManager {
  * Monarch token storage
  */
 export class MonarchTokenManager {
-  constructor(private kv: KVNamespace) {}
+  private encryptionSecret: string;
+
+  constructor(private kv: KVNamespace, encryptionSecret: string) {
+    if (!encryptionSecret) {
+      throw new Error('COOKIE_ENCRYPTION_KEY must be configured for token encryption.');
+    }
+    this.encryptionSecret = encryptionSecret;
+  }
 
   /**
    * Store Monarch Money token
    */
   async storeToken(userId: string, token: string): Promise<void> {
+    const encrypted = await encryptString(this.encryptionSecret, token);
+
     await this.kv.put(
       `monarch:token:${userId}`,
-      token,
+      encrypted,
       { expirationTtl: 60 * 60 * 24 * 90 } // 90 days
     );
   }
@@ -230,7 +241,15 @@ export class MonarchTokenManager {
    * Get Monarch Money token
    */
   async getToken(userId: string): Promise<string | null> {
-    return await this.kv.get(`monarch:token:${userId}`);
+    const encrypted = await this.kv.get(`monarch:token:${userId}`);
+    if (!encrypted) return null;
+
+    try {
+      return await decryptString(this.encryptionSecret, encrypted);
+    } catch (error) {
+      console.error('Failed to decrypt Monarch token:', error);
+      return null;
+    }
   }
 
   /**
@@ -250,11 +269,17 @@ export class OAuthStateManager {
   /**
    * Create OAuth state
    */
-  async createState(): Promise<string> {
+  async createState(metadata?: Record<string, unknown>): Promise<string> {
     const state = crypto.randomUUID();
+    const value = {
+      valid: true,
+      createdAt: new Date().toISOString(),
+      ...(metadata ?? {}),
+    } satisfies Record<string, unknown>;
+
     await this.kv.put(
       `oauth:state:${state}`,
-      'valid',
+      JSON.stringify(value),
       { expirationTtl: 600 } // 10 minutes
     );
     return state;
@@ -263,13 +288,21 @@ export class OAuthStateManager {
   /**
    * Validate OAuth state
    */
-  async validateState(state: string): Promise<boolean> {
-    const value = await this.kv.get(`oauth:state:${state}`);
-    if (value) {
-      // Delete after validation (one-time use)
-      await this.kv.delete(`oauth:state:${state}`);
-      return true;
+  async validateState(state: string): Promise<Record<string, unknown> | null> {
+    const key = `oauth:state:${state}`;
+    const rawValue = await this.kv.get(key);
+    if (!rawValue) return null;
+
+    await this.kv.delete(key);
+
+    try {
+      const parsed = JSON.parse(rawValue);
+      if (parsed && typeof parsed === 'object') {
+        return parsed as Record<string, unknown>;
+      }
+    } catch (error) {
+      console.error('Failed to parse OAuth state payload:', error);
     }
-    return false;
+    return {};
   }
 }
