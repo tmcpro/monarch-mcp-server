@@ -35,6 +35,99 @@ export interface MonarchBudget {
   period?: string;
 }
 
+export type MonarchAuthErrorCode = 'MFA_REQUIRED' | 'INVALID_CREDENTIALS' | 'UNKNOWN';
+
+export class MonarchAuthError extends Error {
+  constructor(
+    message: string,
+    public code: MonarchAuthErrorCode = 'UNKNOWN',
+    public status?: number,
+    public details?: unknown
+  ) {
+    super(message);
+    this.name = 'MonarchAuthError';
+  }
+}
+
+const BASE_HEADERS = {
+  'Content-Type': 'application/json',
+  'Accept': 'application/json',
+  'User-Agent': 'MonarchMCP/1.0 (+https://monarch-mcp.tm3.workers.dev)',
+  'Origin': 'https://app.monarchmoney.com',
+  'Referer': 'https://app.monarchmoney.com/auth/login',
+  'X-Requested-With': 'XMLHttpRequest',
+};
+
+function extractErrorMessage(data: unknown, fallbackText: string | null, status: number): { message: string; code: MonarchAuthErrorCode } {
+  let message = `Monarch Money authentication failed (${status})`;
+  let code: MonarchAuthErrorCode = status === 401 ? 'INVALID_CREDENTIALS' : 'UNKNOWN';
+
+  const candidates: string[] = [];
+  if (typeof data === 'string') {
+    candidates.push(data);
+  } else if (data && typeof data === 'object') {
+    const detail = (data as any).detail;
+    const error = (data as any).error;
+    const messageField = (data as any).message;
+    const nonFieldErrors = (data as any).non_field_errors;
+
+    if (typeof detail === 'string') candidates.push(detail);
+    if (typeof error === 'string') candidates.push(error);
+    if (typeof messageField === 'string') candidates.push(messageField);
+    if (Array.isArray(nonFieldErrors)) {
+      for (const val of nonFieldErrors) {
+        if (typeof val === 'string') candidates.push(val);
+      }
+    }
+  }
+
+  if (fallbackText && fallbackText.trim().length > 0) {
+    candidates.push(fallbackText.trim());
+  }
+
+  const first = candidates.find(Boolean);
+  if (first) {
+    message = first;
+  }
+
+  if (/(mfa|two[-\s]?factor|totp)/i.test(message)) {
+    code = 'MFA_REQUIRED';
+  } else if (status === 401 && !/(mfa|two[-\s]?factor|totp)/i.test(message)) {
+    code = 'INVALID_CREDENTIALS';
+  }
+
+  return { message, code };
+}
+
+async function authenticate(payload: Record<string, unknown>): Promise<string> {
+  const response = await fetch('https://api.monarchmoney.com/auth/login/', {
+    method: 'POST',
+    headers: BASE_HEADERS,
+    body: JSON.stringify(payload),
+  });
+
+  const rawText = await response.text();
+  let data: any = null;
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = rawText;
+    }
+  }
+
+  if (!response.ok) {
+    const { message, code } = extractErrorMessage(data, typeof data === 'string' ? data : rawText, response.status);
+    throw new MonarchAuthError(message, code, response.status, data);
+  }
+
+  if (!data || typeof data !== 'object' || typeof data.token !== 'string') {
+    throw new MonarchAuthError('Received an unexpected response from Monarch Money.', 'UNKNOWN', response.status, data);
+  }
+
+  return data.token;
+}
+
 export class MonarchMoney {
   private token: string;
   private baseUrl = 'https://api.monarchmoney.com/graphql';
@@ -43,56 +136,28 @@ export class MonarchMoney {
     this.token = token;
   }
 
+  getToken(): string {
+    return this.token;
+  }
+
   /**
    * Login to Monarch Money with email and password
    */
   static async login(email: string, password: string): Promise<MonarchMoney> {
-    const response = await fetch('https://api.monarchmoney.com/auth/login/', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ email, password }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Login failed: ${response.statusText}`);
-    }
-
-    const data = await response.json() as { token?: string };
-    if (!data.token) {
-      throw new Error('No token received from login');
-    }
-
-    return new MonarchMoney(data.token);
+    const token = await authenticate({ email, password });
+    return new MonarchMoney(token);
   }
 
   /**
    * Multi-factor authentication
    */
   static async mfaAuth(email: string, password: string, mfaCode: string): Promise<MonarchMoney> {
-    const response = await fetch('https://api.monarchmoney.com/auth/login/', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        email,
-        password,
-        totp_code: mfaCode,
-      }),
+    const token = await authenticate({
+      email,
+      password,
+      totp_code: mfaCode,
     });
-
-    if (!response.ok) {
-      throw new Error(`MFA authentication failed: ${response.statusText}`);
-    }
-
-    const data = await response.json() as { token?: string };
-    if (!data.token) {
-      throw new Error('No token received from MFA authentication');
-    }
-
-    return new MonarchMoney(data.token);
+    return new MonarchMoney(token);
   }
 
   /**

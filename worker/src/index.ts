@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
+import type { StatusCode } from 'hono/utils/http-status';
 import { MonarchMCP } from './mcp-server.js';
 import {
   GitHubOAuth,
@@ -14,7 +15,7 @@ import {
   type Env,
   type SessionData,
 } from './auth.js';
-import { MonarchMoney } from './monarch-client.js';
+import { MonarchMoney, MonarchAuthError } from './monarch-client.js';
 import {
   AuthHealthManager,
   MagicLinkManager,
@@ -459,7 +460,8 @@ app.get('/auth/refresh', async (c) => {
             const response = await fetch('/auth/refresh', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email, password, mfa_code: mfaCode })
+              body: JSON.stringify({ email, password, mfa_code: mfaCode }),
+              credentials: 'include'
             });
 
             const result = await response.json();
@@ -468,7 +470,12 @@ app.get('/auth/refresh', async (c) => {
               messageDiv.innerHTML = '<p class="success">✅ Token refreshed successfully! Redirecting...</p>';
               setTimeout(() => window.location.href = '/dashboard', 2000);
             } else {
-              messageDiv.innerHTML = '<p class="error">❌ ' + result.error + '</p>';
+              if (result.requires_mfa) {
+                messageDiv.innerHTML = '<p class="error">🔐 Multi-factor authentication required. Enter the code from your authenticator app and submit again.</p>';
+                document.getElementById('mfaCode').focus();
+              } else {
+                messageDiv.innerHTML = '<p class="error">❌ ' + (result.error || 'Authentication failed') + '</p>';
+              }
             }
           } catch (error) {
             messageDiv.innerHTML = '<p class="error">❌ Error: ' + error.message + '</p>';
@@ -504,12 +511,7 @@ app.post('/auth/refresh', async (c) => {
 
     // Get the token (note: in real implementation, you'd need to extract this from the client)
     // For now, we'll assume the MonarchMoney class exposes the token
-    const token = (client as any).token;
-
-    if (!token) {
-      return c.json({ error: 'Failed to obtain token from Monarch Money' }, 500);
-    }
-
+    const token = client.getToken();
     // Store token with metadata
     const healthManager = new AuthHealthManager(c.env);
     await healthManager.storeTokenWithMetadata(session.userId, token, 90);
@@ -517,9 +519,31 @@ app.post('/auth/refresh', async (c) => {
     return c.json({ success: true, message: 'Token refreshed successfully' });
   } catch (error) {
     console.error('Token refresh error:', error);
+    if (error instanceof MonarchAuthError) {
+      const responsePayload: Record<string, unknown> = {
+        error: error.message,
+      };
+
+      if (error.code === 'MFA_REQUIRED') {
+        responsePayload.requires_mfa = true;
+      }
+
+      const fallbackStatus =
+        error.code === 'INVALID_CREDENTIALS'
+          ? 401
+          : error.code === 'MFA_REQUIRED'
+            ? 400
+            : error.status ?? 500;
+
+      const status = fallbackStatus as StatusCode;
+      c.status(status);
+      return c.json(responsePayload);
+    }
+
+    c.status(500 as StatusCode);
     return c.json({
-      error: error instanceof Error ? error.message : 'Authentication failed'
-    }, 401);
+      error: 'Authentication failed. Please try again later.'
+    });
   }
 });
 
