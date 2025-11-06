@@ -227,13 +227,9 @@ def get_transactions(
                 "date": txn.get("date"),
                 "amount": txn.get("amount"),
                 "description": txn.get("description"),
-                "category": txn.get("category", {}).get("name")
-                if txn.get("category")
-                else None,
-                "account": txn.get("account", {}).get("displayName"),
-                "merchant": txn.get("merchant", {}).get("name")
-                if txn.get("merchant")
-                else None,
+                "category": (txn.get("category") or {}).get("name"),
+                "account": (txn.get("account") or {}).get("displayName"),
+                "merchant": (txn.get("merchant") or {}).get("name"),
                 "is_pending": txn.get("isPending", False),
             }
             transaction_list.append(transaction_info)
@@ -264,7 +260,7 @@ def get_budgets() -> str:
                 "amount": budget.get("amount"),
                 "spent": budget.get("spent"),
                 "remaining": budget.get("remaining"),
-                "category": budget.get("category", {}).get("name"),
+                "category": (budget.get("category") or {}).get("name"),
                 "period": budget.get("period"),
             }
             budget_list.append(budget_info)
