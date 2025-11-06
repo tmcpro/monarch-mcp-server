@@ -91,6 +91,8 @@ export class MCPOAuthManager {
   constructor(private env: Env) {}
 
   /**
+   * Persist a short-lived authorization code and PKCE metadata in KV storage.
+   */
   async storeAuthorizationCode(
     code: string,
     userId: string,

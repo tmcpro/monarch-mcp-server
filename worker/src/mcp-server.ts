@@ -5,7 +5,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { MonarchMoney } from './monarch-client.js';
+import { MonarchMoney, MonarchAuthError } from './monarch-client.js';
 import { MonarchTokenManager, type Env } from './auth.js';
 import {
   AuthHealthManager,
@@ -14,6 +14,7 @@ import {
   generateSetupWizardMessage,
   generateStatusReport,
 } from './auth-flow.js';
+import { TokenRefreshManager } from './token-refresh.js';
 
 export class MonarchMCP {
   server = new McpServer({
@@ -44,6 +45,10 @@ export class MonarchMCP {
         throw new Error(errorMessage);
       }
 
+      // Check if token needs refresh (proactive warning)
+      const refreshManager = new TokenRefreshManager(this.env, this.userId);
+      const refreshStatus = await refreshManager.needsRefresh({ refreshThresholdDays: 7 });
+
       // Get token from KV storage (encrypted)
       const tokenManager = new MonarchTokenManager(this.env.MONARCH_KV, this.env.COOKIE_ENCRYPTION_KEY);
       const token = await tokenManager.getToken(this.userId);
@@ -52,9 +57,17 @@ export class MonarchMCP {
         throw new Error('Token validation failed. Please try the setup_wizard tool.');
       }
 
-      return new MonarchMoney(token);
+      const client = new MonarchMoney(token);
+
+      // If token expires soon, add a warning to logs (won't block the request)
+      if (refreshStatus.needsRefresh && refreshStatus.daysUntilExpiry && refreshStatus.daysUntilExpiry > 0) {
+        console.warn(`[MCP] Token for user ${this.userId} expires in ${refreshStatus.daysUntilExpiry} days`);
+      }
+
+      return client;
     } catch (error) {
-      console.error('Error getting Monarch client:', error);
+      // Log the error for debugging
+      console.error('[MCP] getMonarchClient error:', error);
       throw error;
     }
   }
@@ -101,23 +114,46 @@ export class MonarchMCP {
         description: 'Checks the authentication status.',
       },
       async () => {
-        const healthManager = new AuthHealthManager(this.env);
+        try {
+          const healthManager = new AuthHealthManager(this.env);
+          const refreshManager = new TokenRefreshManager(this.env, this.userId);
 
-        // Check comprehensive auth health
-        const status = await healthManager.checkAuthHealth(this.userId, this.baseUrl);
+          // Check comprehensive auth health
+          const status = await healthManager.checkAuthHealth(this.userId, this.baseUrl);
 
-        // Get days until expiry
-        const daysUntilExpiry = await healthManager.getDaysUntilExpiry(this.userId);
+          // Get days until expiry
+          const daysUntilExpiry = await healthManager.getDaysUntilExpiry(this.userId);
 
-        // Generate status report
-        const message = generateStatusReport(status, daysUntilExpiry);
+          // Check if token needs refresh
+          const refreshStatus = await refreshManager.needsRefresh({ refreshThresholdDays: 7 });
 
-        return {
-          content: [{
-            type: 'text',
-            text: message
-          }]
-        };
+          // Generate status report
+          let message = generateStatusReport(status, daysUntilExpiry);
+
+          // Add refresh reminder if needed
+          if (refreshStatus.needsRefresh) {
+            const reminder = await refreshManager.getRefreshReminder();
+            if (reminder) {
+              message += '\n\n' + reminder;
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: message
+            }]
+          };
+        } catch (error) {
+          console.error('[MCP] check_status error:', error);
+          return {
+            content: [{
+              type: 'text',
+              text: `Error checking status: ${error instanceof Error ? error.message : String(error)}`
+            }],
+            isError: true
+          };
+        }
       }
     );
 
@@ -215,6 +251,23 @@ export class MonarchMCP {
             }]
           };
         } catch (error) {
+          console.error('[MCP] get_accounts error:', error);
+
+          // Check if this is an auth error
+          if (error instanceof MonarchAuthError) {
+            const refreshManager = new TokenRefreshManager(this.env, this.userId);
+            const reminder = await refreshManager.getRefreshReminder();
+            const message = error.message + (reminder ? '\n\n' + reminder : '');
+
+            return {
+              content: [{
+                type: 'text',
+                text: message
+              }],
+              isError: true
+            };
+          }
+
           return {
             content: [{
               type: 'text',
@@ -265,6 +318,23 @@ export class MonarchMCP {
             }]
           };
         } catch (error) {
+          console.error('[MCP] get_transactions error:', error);
+
+          // Check if this is an auth error
+          if (error instanceof MonarchAuthError) {
+            const refreshManager = new TokenRefreshManager(this.env, this.userId);
+            const reminder = await refreshManager.getRefreshReminder();
+            const message = error.message + (reminder ? '\n\n' + reminder : '');
+
+            return {
+              content: [{
+                type: 'text',
+                text: message
+              }],
+              isError: true
+            };
+          }
+
           return {
             content: [{
               type: 'text',
