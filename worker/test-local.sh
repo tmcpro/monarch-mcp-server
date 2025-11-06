@@ -8,7 +8,7 @@ echo "=========================================="
 echo ""
 
 # Check if wrangler is installed
-if ! command -v wrangler &> /dev/null; then
+if ! npx wrangler --version &> /dev/null; then
     echo "❌ Wrangler not found. Install with: npm install -g wrangler"
     exit 1
 fi

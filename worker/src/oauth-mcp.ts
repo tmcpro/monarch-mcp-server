@@ -91,8 +91,6 @@ export class MCPOAuthManager {
   constructor(private env: Env) {}
 
   /**
-   * Store authorization code with PKCE challenge
-   */
   async storeAuthorizationCode(
     code: string,
     userId: string,

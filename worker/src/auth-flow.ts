@@ -286,76 +286,28 @@ export function generateAuthErrorMessage(status: AuthStatus): string {
  * Generate setup wizard instructions
  */
 export function generateSetupWizardMessage(magicLink: string, daysUntilExpiry: number | null): string {
+  if (daysUntilExpiry && daysUntilExpiry > 0) {
+    return `✅ You are already authenticated. Your token is valid for ${daysUntilExpiry} more days.`;
+  }
+
   const message = `
 🧙 **Monarch Money MCP - Setup Wizard**
 
 Welcome! Let's get your Monarch Money integration set up.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+To connect your Monarch Money account, please follow these steps:
 
-📋 **Setup Checklist:**
+1. **Click the magic link below to open a secure authentication page in your browser.**
 
-✅ **Step 1: Authenticate with GitHub**
-   Status: COMPLETE ✓
+   🔗 **[Authenticate with Monarch Money](${magicLink})**
 
-🔄 **Step 2: Connect Monarch Money**
-   Status: NEEDED
+2. **Enter your Monarch Money credentials in the secure browser window.**
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. **After successful authentication, you can close the browser window and return to your chat.**
 
-🔗 **Your Personal Setup Link:**
+Your authentication token will be securely stored for 90 days.
 
-${magicLink}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📝 **Instructions:**
-
-1. Click or copy the link above
-2. It will open in your browser (already logged in via GitHub)
-3. Enter your Monarch Money credentials:
-   • Email address
-   • Password
-   • 2FA code (if you have MFA enabled)
-4. Click "Authenticate"
-5. Return to this conversation
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🔐 **Security Notes:**
-
-• Your credentials are NEVER stored
-• Only your authentication token is saved (encrypted)
-• Token is stored in Cloudflare KV (enterprise-grade encryption)
-• Token lasts 90 days before needing refresh
-• Magic link expires in 10 minutes
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-💡 **After Setup:**
-
-Once authenticated, you can use these tools:
-• get_accounts - View your financial accounts
-• get_transactions - Access transaction history
-• get_budgets - Check budget status
-• get_cashflow - Analyze income/expenses
-• ...and more!
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-❓ **Need Help?**
-
-If you encounter issues:
-• Make sure you're using the correct Monarch Money credentials
-• Check that your 2FA code is current (refreshes every 30 seconds)
-• Try the link again if it expired (use setup_wizard again)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-⏱️ **Link expires in:** 10 minutes
-🔗 **Setup URL:** ${magicLink}
-
-Ready? Click the link above to get started! 🚀
+This magic link will expire in 10 minutes.
 `.trim();
 
   return message;
@@ -367,54 +319,15 @@ Ready? Click the link above to get started! 🚀
 export function generateStatusReport(status: AuthStatus, daysUntilExpiry: number | null): string {
   let message = '📊 **Monarch Money MCP - Status Report**\n\n';
 
-  message += '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-
-  // GitHub Auth Status
-  message += '**GitHub Authentication:**\n';
-  message += status.authenticated ? '✅ Connected\n\n' : '❌ Not Connected\n\n';
-
-  // Monarch Token Status
-  message += '**Monarch Money Token:**\n';
   if (status.hasMonarchToken) {
-    message += '✅ Active\n';
+    message += '✅ Your Monarch Money account is connected.\n';
     if (daysUntilExpiry !== null) {
-      if (daysUntilExpiry > 30) {
-        message += `🟢 Expires in: ${daysUntilExpiry} days\n`;
-      } else if (daysUntilExpiry > 7) {
-        message += `🟡 Expires in: ${daysUntilExpiry} days (consider refreshing soon)\n`;
-      } else {
-        message += `🔴 Expires in: ${daysUntilExpiry} days (refresh recommended!)\n`;
-      }
-    }
-    message += `📅 Expiry Date: ${status.tokenExpiry || 'unknown'}\n`;
-  } else {
-    message += '❌ Not Configured\n';
-  }
-
-  message += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-
-  // Action Required
-  if (status.needsAction) {
-    message += '⚠️  **Action Required:**\n\n';
-    if (status.actionRequired === 'initial_setup') {
-      message += 'You need to complete initial setup.\n';
-      message += `🔗 Setup URL: ${status.setupUrl}\n\n`;
-      message += '💡 Use the `setup_wizard` tool for guided setup.\n';
-    } else if (status.actionRequired === 'token_expired') {
-      message += 'Your token has expired and needs to be refreshed.\n';
-      message += `🔗 Refresh URL: ${status.setupUrl}\n\n`;
-      message += '💡 This only takes a minute!\n';
+      message += `Your token is valid for ${daysUntilExpiry} more days.\n`;
     }
   } else {
-    message += '✅ **All Systems Ready**\n\n';
-    message += 'Your MCP server is fully configured and ready to use!\n\n';
-    message += '🚀 Try these commands:\n';
-    message += '• `get_accounts` - View your accounts\n';
-    message += '• `get_transactions` - See recent transactions\n';
-    message += '• `get_budgets` - Check budget status\n';
+    message += '❌ Your Monarch Money account is not connected.\n';
+    message += 'Please use the `setup_wizard` tool to connect your account.\n';
   }
-
-  message += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
 
   return message;
 }

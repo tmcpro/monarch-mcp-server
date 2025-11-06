@@ -733,6 +733,7 @@ app.all('/mcp', async (c) => {
   let cached = mcpServerCache.get(cacheKey);
 
   if (!cached) {
+  try {
     const serverInstance = new MonarchMCP(c.env, userId, baseUrl);
     await serverInstance.init();
     const handler = createMcpHandler(serverInstance.server, {
@@ -746,6 +747,10 @@ app.all('/mcp', async (c) => {
     });
     cached = { handler, server: serverInstance };
     mcpServerCache.set(cacheKey, cached);
+  } catch (error) {
+    console.error('Error in /mcp endpoint:', error);
+    return c.json({ error: 'server_error', error_description: 'Failed to create MCP server instance' }, 500);
+  }
   } else {
     cached.server.updateContext(c.env, baseUrl);
   }

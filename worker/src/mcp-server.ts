@@ -33,35 +33,42 @@ export class MonarchMCP {
    * Throws user-friendly error with setup instructions if not authenticated
    */
   private async getMonarchClient(): Promise<MonarchMoney> {
-    // Check auth health first
-    const healthManager = new AuthHealthManager(this.env);
-    const status = await healthManager.checkAuthHealth(this.userId, this.baseUrl);
+    try {
+      // Check auth health first
+      const healthManager = new AuthHealthManager(this.env);
+      const status = await healthManager.checkAuthHealth(this.userId, this.baseUrl);
 
-    if (!status.hasMonarchToken) {
-      // Generate user-friendly error message
-      const errorMessage = generateAuthErrorMessage(status);
-      throw new Error(errorMessage);
+      if (!status.hasMonarchToken) {
+        // Generate user-friendly error message
+        const errorMessage = generateAuthErrorMessage(status);
+        throw new Error(errorMessage);
+      }
+
+      // Get token from KV storage (encrypted)
+      const tokenManager = new MonarchTokenManager(this.env.MONARCH_KV, this.env.COOKIE_ENCRYPTION_KEY);
+      const token = await tokenManager.getToken(this.userId);
+
+      if (!token) {
+        throw new Error('Token validation failed. Please try the setup_wizard tool.');
+      }
+
+      return new MonarchMoney(token);
+    } catch (error) {
+      console.error('Error getting Monarch client:', error);
+      throw error;
     }
-
-    // Get token from KV storage (encrypted)
-    const tokenManager = new MonarchTokenManager(this.env.MONARCH_KV, this.env.COOKIE_ENCRYPTION_KEY);
-    const token = await tokenManager.getToken(this.userId);
-
-    if (!token) {
-      throw new Error('Token validation failed. Please try the setup_wizard tool.');
-    }
-
-    return new MonarchMoney(token);
   }
 
   /**
    * Initialize MCP server with all tools
    */
   async init() {
-    // Tool 1: Setup Wizard (Enhanced - with magic link)
+    // Tool 1: Setup Wizard
     this.server.tool(
       'setup_wizard',
-      {},
+      {
+        description: 'Guides the user through the authentication process.',
+      },
       async () => {
         const healthManager = new AuthHealthManager(this.env);
         const magicLinkManager = new MagicLinkManager(this.env);
@@ -87,10 +94,12 @@ export class MonarchMCP {
       }
     );
 
-    // Tool 2: Check Status (Enhanced - comprehensive health check)
+    // Tool 2: Check Authentication Status
     this.server.tool(
-      'check_status',
-      {},
+      'check_auth_status',
+      {
+        description: 'Checks the authentication status.',
+      },
       async () => {
         const healthManager = new AuthHealthManager(this.env);
 
@@ -111,6 +120,8 @@ export class MonarchMCP {
         };
       }
     );
+
+
 
     // Tool 3: Legacy Setup Authentication (kept for backward compatibility)
     this.server.tool(
@@ -219,11 +230,11 @@ export class MonarchMCP {
     this.server.tool(
       'get_transactions',
       {
-        limit: z.number().optional().default(100),
-        offset: z.number().optional().default(0),
-        start_date: z.string().optional(),
-        end_date: z.string().optional(),
-        account_id: z.string().optional(),
+        limit: z.number().optional().default(100).describe('The maximum number of transactions to return.'),
+        offset: z.number().optional().default(0).describe('The number of transactions to skip.'),
+        start_date: z.string().optional().describe('The start date of the transactions to return, in YYYY-MM-DD format.'),
+        end_date: z.string().optional().describe('The end date of the transactions to return, in YYYY-MM-DD format.'),
+        account_id: z.string().optional().describe('The ID of the account to retrieve transactions for.'),
       },
       async ({ limit, offset, start_date, end_date, account_id }) => {
         try {
@@ -306,8 +317,8 @@ export class MonarchMCP {
     this.server.tool(
       'get_cashflow',
       {
-        start_date: z.string().optional(),
-        end_date: z.string().optional(),
+        start_date: z.string().optional().describe('The start date of the cashflow to return, in YYYY-MM-DD format.'),
+        end_date: z.string().optional().describe('The end date of the cashflow to return, in YYYY-MM-DD format.'),
       },
       async ({ start_date, end_date }) => {
         try {
@@ -336,7 +347,7 @@ export class MonarchMCP {
     this.server.tool(
       'get_account_holdings',
       {
-        account_id: z.string(),
+        account_id: z.string().describe('The ID of the account to retrieve holdings for.'),
       },
       async ({ account_id }) => {
         try {
@@ -365,12 +376,12 @@ export class MonarchMCP {
     this.server.tool(
       'create_transaction',
       {
-        account_id: z.string(),
-        amount: z.number(),
-        description: z.string(),
-        date: z.string(),
-        category_id: z.string().optional(),
-        merchant_name: z.string().optional(),
+        account_id: z.string().describe('The ID of the account to create the transaction in.'),
+        amount: z.number().describe('The amount of the transaction.'),
+        description: z.string().describe('The description of the transaction.'),
+        date: z.string().describe('The date of the transaction, in YYYY-MM-DD format.'),
+        category_id: z.string().optional().describe('The ID of the category to assign to the transaction.'),
+        merchant_name: z.string().optional().describe('The name of the merchant.'),
       },
       async ({ account_id, amount, description, date, category_id, merchant_name }) => {
         try {
@@ -406,11 +417,11 @@ export class MonarchMCP {
     this.server.tool(
       'update_transaction',
       {
-        transaction_id: z.string(),
-        amount: z.number().optional(),
-        description: z.string().optional(),
-        category_id: z.string().optional(),
-        date: z.string().optional(),
+        transaction_id: z.string().describe('The ID of the transaction to update.'),
+        amount: z.number().optional().describe('The new amount of the transaction.'),
+        description: z.string().optional().describe('The new description of the transaction.'),
+        category_id: z.string().optional().describe('The new ID of the category to assign to the transaction.'),
+        date: z.string().optional().describe('The new date of the transaction, in YYYY-MM-DD format.'),
       },
       async ({ transaction_id, amount, description, category_id, date }) => {
         try {
