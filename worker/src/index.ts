@@ -194,7 +194,9 @@ app.get('/oauth/authorize', async (c) => {
 
 // OAuth Token Endpoint - For MCP clients
 app.post('/oauth/token', async (c) => {
+  const startTime = Date.now();
   try {
+    console.log('[OAuth Token] Processing token request');
     const contentType = c.req.header('content-type') || '';
     let body: OAuth2TokenRequest;
 
@@ -303,10 +305,19 @@ app.post('/oauth/token', async (c) => {
       return c.json(response);
     }
 
-    return c.json({ error: 'unsupported_grant_type' }, 400);
+    console.warn('[OAuth Token] Unsupported grant type:', body.grant_type);
+    return c.json({ error: 'unsupported_grant_type', error_description: `Grant type '${body.grant_type}' is not supported` }, 400);
   } catch (error) {
-    console.error('Token endpoint error:', error);
-    return c.json({ error: 'server_error' }, 500);
+    const duration = Date.now() - startTime;
+    console.error(`[OAuth Token] Error after ${duration}ms:`, error);
+    return c.json({
+      error: 'server_error',
+      error_description: 'An internal server error occurred while processing the token request',
+      details: error instanceof Error ? error.message : String(error)
+    }, 500);
+  } finally {
+    const duration = Date.now() - startTime;
+    console.log(`[OAuth Token] Request completed in ${duration}ms`);
   }
 });
 
@@ -703,57 +714,73 @@ app.get('/auth/logout', async (c) => {
 
 // MCP Endpoint (protected) - Accepts OAuth Bearer tokens
 app.all('/mcp', async (c) => {
-  let userId: string;
+  try {
+    let userId: string;
 
-  const authHeader = c.req.header('Authorization');
+    const authHeader = c.req.header('Authorization');
 
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.substring(7);
-    const mcpOAuth = new MCPOAuthManager(c.env);
-    const tokenData = await mcpOAuth.validateAccessToken(token);
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      const mcpOAuth = new MCPOAuthManager(c.env);
+      const tokenData = await mcpOAuth.validateAccessToken(token);
 
-    if (!tokenData) {
-      return c.json(
-        { error: 'invalid_token', error_description: 'The access token is invalid or expired' },
-        401,
-        { 'WWW-Authenticate': 'Bearer realm="MCP"' }
-      );
+      if (!tokenData) {
+        console.warn('[MCP] Invalid or expired OAuth token');
+        return c.json(
+          { error: 'invalid_token', error_description: 'The access token is invalid or expired. Please re-authenticate.' },
+          401,
+          { 'WWW-Authenticate': 'Bearer realm="MCP"' }
+        );
+      }
+
+      userId = tokenData.userId;
+      console.log(`[MCP] Authenticated user via OAuth: ${userId}`);
+    } else {
+      const sessionResult = await requireAuth(c);
+      if (sessionResult instanceof Response) return sessionResult;
+      const session = sessionResult as SessionData;
+      userId = session.userId;
+      console.log(`[MCP] Authenticated user via session: ${userId}`);
     }
 
-    userId = tokenData.userId;
-  } else {
-    const sessionResult = await requireAuth(c);
-    if (sessionResult instanceof Response) return sessionResult;
-    const session = sessionResult as SessionData;
-    userId = session.userId;
+    const baseUrl = new URL(c.req.url).origin;
+    const cacheKey = userId;
+    let cached = mcpServerCache.get(cacheKey);
+
+    if (!cached) {
+      console.log(`[MCP] Creating new MCP server instance for user: ${userId}`);
+      const serverInstance = new MonarchMCP(c.env, userId, baseUrl);
+      await serverInstance.init();
+      const handler = createMcpHandler(serverInstance.server, {
+        route: '/mcp',
+        corsOptions: {
+          origin: '*',
+          headers: 'Content-Type, Accept, Authorization, mcp-session-id, MCP-Protocol-Version',
+          methods: 'GET, POST, DELETE, OPTIONS',
+          exposeHeaders: 'mcp-session-id'
+        }
+      });
+      cached = { handler, server: serverInstance };
+      mcpServerCache.set(cacheKey, cached);
+    } else {
+      cached.server.updateContext(c.env, baseUrl);
+    }
+
+    const executionCtx = c.executionCtx as ExecutionContext & { props?: Record<string, unknown> };
+    executionCtx.props = { userId };
+
+    return cached.handler(c.req.raw, c.env, executionCtx);
+  } catch (error) {
+    console.error('[MCP] Unexpected error:', error);
+    return c.json(
+      {
+        error: 'server_error',
+        error_description: 'An unexpected error occurred. Please try again later.',
+        details: error instanceof Error ? error.message : String(error)
+      },
+      500
+    );
   }
-
-  const baseUrl = new URL(c.req.url).origin;
-  const cacheKey = userId;
-  let cached = mcpServerCache.get(cacheKey);
-
-  if (!cached) {
-    const serverInstance = new MonarchMCP(c.env, userId, baseUrl);
-    await serverInstance.init();
-    const handler = createMcpHandler(serverInstance.server, {
-      route: '/mcp',
-      corsOptions: {
-        origin: '*',
-        headers: 'Content-Type, Accept, Authorization, mcp-session-id, MCP-Protocol-Version',
-        methods: 'GET, POST, DELETE, OPTIONS',
-        exposeHeaders: 'mcp-session-id'
-      }
-    });
-    cached = { handler, server: serverInstance };
-    mcpServerCache.set(cacheKey, cached);
-  } else {
-    cached.server.updateContext(c.env, baseUrl);
-  }
-
-  const executionCtx = c.executionCtx as ExecutionContext & { props?: Record<string, unknown> };
-  executionCtx.props = { userId };
-
-  return cached.handler(c.req.raw, c.env, executionCtx);
 });
 
 // Health check
