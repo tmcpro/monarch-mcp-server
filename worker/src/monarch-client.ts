@@ -183,26 +183,52 @@ export class MonarchMoney {
    * Execute a GraphQL query
    */
   private async query(query: string, variables?: Record<string, unknown>): Promise<any> {
-    const response = await fetch(this.baseUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Token ${this.token}`,
-      },
-      body: JSON.stringify({ query, variables }),
-    });
+    try {
+      const response = await fetch(this.baseUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Token ${this.token}`,
+        },
+        body: JSON.stringify({ query, variables }),
+      });
 
-    if (!response.ok) {
-      throw new Error(`GraphQL request failed: ${response.statusText}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[Monarch] GraphQL request failed (${response.status}):`, errorText);
+
+        // Check if token is expired or invalid
+        if (response.status === 401 || response.status === 403) {
+          throw new MonarchAuthError(
+            'Your Monarch Money session has expired. Please use the setup_wizard tool to re-authenticate.',
+            'INVALID_CREDENTIALS',
+            response.status,
+            { responseText: errorText }
+          );
+        }
+
+        throw new Error(`GraphQL request failed (${response.status}): ${response.statusText}`);
+      }
+
+      const result = await response.json() as { data?: any; errors?: any[] };
+
+      if (result.errors) {
+        console.error('[Monarch] GraphQL errors:', result.errors);
+        const errorMessage = result.errors.map((e: any) => e.message || JSON.stringify(e)).join(', ');
+        throw new Error(`GraphQL errors: ${errorMessage}`);
+      }
+
+      return result.data;
+    } catch (error) {
+      // Re-throw MonarchAuthError as-is
+      if (error instanceof MonarchAuthError) {
+        throw error;
+      }
+
+      // Wrap other errors
+      console.error('[Monarch] Query error:', error);
+      throw error;
     }
-
-    const result = await response.json() as { data?: any; errors?: any[] };
-
-    if (result.errors) {
-      throw new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`);
-    }
-
-    return result.data;
   }
 
   /**
