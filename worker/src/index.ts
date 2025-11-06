@@ -110,86 +110,123 @@ app.get('/.well-known/oauth-authorization-server', (c) => {
 
 // OAuth Authorization Endpoint - For MCP clients
 app.get('/oauth/authorize', async (c) => {
-  const clientId = c.req.query('client_id');
-  const redirectUri = c.req.query('redirect_uri');
-  const state = c.req.query('state');
-  const codeChallenge = c.req.query('code_challenge');
-  const codeChallengeMethod = c.req.query('code_challenge_method');
-  const responseType = c.req.query('response_type');
-
-  if (!clientId || !redirectUri || !state || !codeChallenge) {
-    return c.json({ error: 'invalid_request', error_description: 'Missing required parameters' }, 400);
-  }
-
-  if (responseType !== 'code') {
-    return c.json({ error: 'unsupported_response_type' }, 400);
-  }
-
-  if (codeChallengeMethod !== 'S256') {
-    return c.json({ error: 'invalid_request', error_description: 'Only S256 code_challenge_method is supported' }, 400);
-  }
-
-  let parsedRedirect: URL;
   try {
-    parsedRedirect = new URL(redirectUri);
-  } catch (error) {
-    return c.json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' }, 400);
-  }
+    console.log('[OAuth Authorize] Processing authorization request');
 
-  if (parsedRedirect.protocol !== 'https:' && parsedRedirect.hostname !== 'localhost') {
-    return c.json({ error: 'invalid_request', error_description: 'redirect_uri must use https scheme' }, 400);
-  }
+    const clientId = c.req.query('client_id');
+    const redirectUri = c.req.query('redirect_uri');
+    const state = c.req.query('state');
+    const codeChallenge = c.req.query('code_challenge');
+    const codeChallengeMethod = c.req.query('code_challenge_method');
+    const responseType = c.req.query('response_type');
 
-  const mcpOAuthManager = new MCPOAuthManager(c.env);
-  const clientRegistration = await mcpOAuthManager.getClient(clientId);
+    console.log('[OAuth Authorize] Parameters:', { clientId, redirectUri: redirectUri?.substring(0, 50), state, responseType, codeChallengeMethod });
 
-  if (!clientRegistration) {
-    return c.json({ error: 'unauthorized_client', error_description: 'Unknown client_id' }, 400);
-  }
-
-  if (clientRegistration.redirect_uris && clientRegistration.redirect_uris.length > 0) {
-    const allowed = clientRegistration.redirect_uris.includes(redirectUri);
-    if (!allowed) {
-      return c.json({ error: 'invalid_request', error_description: 'redirect_uri not registered for this client' }, 400);
+    if (!clientId || !redirectUri || !state || !codeChallenge) {
+      console.warn('[OAuth Authorize] Missing required parameters');
+      return c.json({ error: 'invalid_request', error_description: 'Missing required parameters' }, 400);
     }
+
+    if (responseType !== 'code') {
+      console.warn('[OAuth Authorize] Unsupported response type:', responseType);
+      return c.json({ error: 'unsupported_response_type' }, 400);
+    }
+
+    if (codeChallengeMethod !== 'S256') {
+      console.warn('[OAuth Authorize] Unsupported code challenge method:', codeChallengeMethod);
+      return c.json({ error: 'invalid_request', error_description: 'Only S256 code_challenge_method is supported' }, 400);
+    }
+
+    let parsedRedirect: URL;
+    try {
+      parsedRedirect = new URL(redirectUri);
+    } catch (error) {
+      console.error('[OAuth Authorize] Invalid redirect_uri:', error);
+      return c.json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' }, 400);
+    }
+
+    if (parsedRedirect.protocol !== 'https:' && parsedRedirect.hostname !== 'localhost') {
+      console.warn('[OAuth Authorize] Insecure redirect_uri protocol:', parsedRedirect.protocol);
+      return c.json({ error: 'invalid_request', error_description: 'redirect_uri must use https scheme' }, 400);
+    }
+
+    const mcpOAuthManager = new MCPOAuthManager(c.env);
+
+    console.log('[OAuth Authorize] Checking client registration');
+    const clientRegistration = await mcpOAuthManager.getClient(clientId);
+
+    if (!clientRegistration) {
+      console.warn('[OAuth Authorize] Unknown client_id:', clientId);
+      return c.json({ error: 'unauthorized_client', error_description: 'Unknown client_id' }, 400);
+    }
+
+    if (clientRegistration.redirect_uris && clientRegistration.redirect_uris.length > 0) {
+      const allowed = clientRegistration.redirect_uris.includes(redirectUri);
+      if (!allowed) {
+        console.warn('[OAuth Authorize] redirect_uri not registered for client');
+        return c.json({ error: 'invalid_request', error_description: 'redirect_uri not registered for this client' }, 400);
+      }
+    }
+
+    // Check if user is already authenticated
+    console.log('[OAuth Authorize] Checking session authentication');
+    const sessionId = getCookie(c, 'session_id');
+    const sessionManager = new SessionManager(c.env.OAUTH_KV);
+    const session = sessionId ? await sessionManager.getSession(sessionId) : null;
+
+    if (!session || !session.authenticated) {
+      console.log('[OAuth Authorize] User not authenticated, redirecting to login');
+      // Store OAuth params and redirect to GitHub login
+      const baseUrl = new URL(c.req.url).origin;
+
+      try {
+        await c.env.OAUTH_KV.put(
+          `oauth:pending:${state}`,
+          JSON.stringify({ clientId, redirectUri, codeChallenge, codeChallengeMethod }),
+          { expirationTtl: 600 }
+        );
+      } catch (kvError) {
+        console.error('[OAuth Authorize] Failed to store pending OAuth params:', kvError);
+        return c.json({ error: 'server_error', error_description: 'Failed to initialize OAuth flow' }, 500);
+      }
+
+      // Redirect to GitHub OAuth login
+      return c.redirect(`${baseUrl}/auth/login?oauth_state=${state}`);
+    }
+
+    console.log('[OAuth Authorize] User authenticated, generating authorization code');
+    // User is authenticated, generate authorization code
+    const code = crypto.randomUUID();
+
+    try {
+      await mcpOAuthManager.storeAuthorizationCode(
+        code,
+        session.userId,
+        clientId,
+        redirectUri,
+        codeChallenge,
+        codeChallengeMethod
+      );
+    } catch (storeError) {
+      console.error('[OAuth Authorize] Failed to store authorization code:', storeError);
+      return c.json({ error: 'server_error', error_description: 'Failed to generate authorization code' }, 500);
+    }
+
+    // Redirect back to client with authorization code
+    const redirectUrl = new URL(redirectUri);
+    redirectUrl.searchParams.set('code', code);
+    redirectUrl.searchParams.set('state', state);
+
+    console.log('[OAuth Authorize] Authorization successful, redirecting to client');
+    return c.redirect(redirectUrl.toString());
+  } catch (error) {
+    console.error('[OAuth Authorize] Unexpected error:', error);
+    return c.json({
+      error: 'server_error',
+      error_description: 'An internal server error occurred during authorization',
+      details: error instanceof Error ? error.message : String(error)
+    }, 500);
   }
-
-  // Check if user is already authenticated
-  const sessionId = getCookie(c, 'session_id');
-  const sessionManager = new SessionManager(c.env.OAUTH_KV);
-  const session = sessionId ? await sessionManager.getSession(sessionId) : null;
-
-  if (!session || !session.authenticated) {
-    // Store OAuth params and redirect to GitHub login
-    const baseUrl = new URL(c.req.url).origin;
-    await c.env.OAUTH_KV.put(
-      `oauth:pending:${state}`,
-      JSON.stringify({ clientId, redirectUri, codeChallenge, codeChallengeMethod }),
-      { expirationTtl: 600 }
-    );
-
-    // Redirect to GitHub OAuth login
-    return c.redirect(`${baseUrl}/auth/login?oauth_state=${state}`);
-  }
-
-  // User is authenticated, generate authorization code
-  const code = crypto.randomUUID();
-
-  await mcpOAuthManager.storeAuthorizationCode(
-    code,
-    session.userId,
-    clientId,
-    redirectUri,
-    codeChallenge,
-    codeChallengeMethod
-  );
-
-  // Redirect back to client with authorization code
-  const redirectUrl = new URL(redirectUri);
-  redirectUrl.searchParams.set('code', code);
-  redirectUrl.searchParams.set('state', state);
-
-  return c.redirect(redirectUrl.toString());
 });
 
 // OAuth Token Endpoint - For MCP clients
